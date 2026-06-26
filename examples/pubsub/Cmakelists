@@ -1,0 +1,29 @@
+cmake_minimum_required(VERSION 3.13)
+project(opcua_azure_iot C)
+
+# ── open62541 must be installed (or built in-tree) with:
+#    -DUA_ENABLE_PUBSUB=ON
+#    -DUA_ENABLE_MQTT=ON
+#    -DUA_ENABLE_JSON_ENCODING=ON
+#    -DUA_ENABLE_ENCRYPTION=OPENSSL   (required for TLS)
+find_package(open62541 REQUIRED)
+
+# Publisher
+add_executable(azure_pubsub_publisher
+    src/azure_pubsub_mqtt_publish.c
+)
+target_link_libraries(azure_pubsub_publisher
+    open62541::open62541
+)
+
+# Subscriber
+add_executable(azure_pubsub_subscriber
+    src/azure_pubsub_mqtt_subscribe.c
+)
+target_link_libraries(azure_pubsub_subscriber
+    open62541::open62541
+)
+
+install(TARGETS azure_pubsub_publisher azure_pubsub_subscriber
+    RUNTIME DESTINATION bin
+)
