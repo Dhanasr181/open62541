@@ -1,0 +1,64 @@
+version: "3.9"
+
+# ════════════════════════════════════════════════════════════════════════════
+#  OPC UA PubSub → Azure IoT Hub  (X.509 mutual TLS)
+#
+#  Prerequisites before running:
+#    1. Generate / obtain certificates (see scripts/generate_certs.sh).
+#    2. Create a .env file (copy from .env.example) and fill in:
+#         AZURE_IOT_HUB_NAME=<your-hub-name>          # without .azure-devices.net
+#         AZURE_DEVICE_ID=<your-device-id>
+#    3. Place certificates in ./certs/:
+#         device.crt       – device certificate (PEM)
+#         device.key       – device private key  (PEM)
+#         azure_root_ca.pem – DigiCert Global Root G2
+#
+#  Run:
+#    docker compose up --build
+# ════════════════════════════════════════════════════════════════════════════
+
+x-common-env: &common-env
+  AZURE_IOT_HUB_NAME: ${AZURE_IOT_HUB_NAME}
+  AZURE_DEVICE_ID:    ${AZURE_DEVICE_ID}
+
+x-cert-volume: &cert-volume
+  - type: bind
+    source: ./certs
+    target: /certs
+    read_only: true
+
+services:
+
+  # ── Publisher ─────────────────────────────────────────────────────────────
+  publisher:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: opcua-azure:latest
+    container_name: opcua_azure_publisher
+    restart: unless-stopped
+    environment:
+      <<: *common-env
+    volumes: *cert-volume
+    command: ["/usr/local/bin/azure_pubsub_publisher"]
+    # No ports needed – publisher pushes to Azure IoT Hub outbound
+    networks:
+      - opcua_net
+
+  # ── Subscriber ────────────────────────────────────────────────────────────
+  subscriber:
+    image: opcua-azure:latest   # reuses the same image built above
+    container_name: opcua_azure_subscriber
+    restart: unless-stopped
+    environment:
+      <<: *common-env
+    volumes: *cert-volume
+    command: ["/usr/local/bin/azure_pubsub_subscriber"]
+    networks:
+      - opcua_net
+    depends_on:
+      - publisher
+
+networks:
+  opcua_net:
+    driver: bridge
