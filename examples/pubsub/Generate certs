@@ -1,0 +1,119 @@
+#!/usr/bin/env bash
+# ════════════════════════════════════════════════════════════════════════════
+#  scripts/generate_certs.sh
+#
+#  Generates a self-signed CA + device certificate for Azure IoT Hub X.509
+#  authentication, and walks you through registering them.
+#
+#  Usage:
+#    chmod +x scripts/generate_certs.sh
+#    ./scripts/generate_certs.sh
+#
+#  Requirements: openssl, curl (optional), az CLI (optional for auto-register)
+# ════════════════════════════════════════════════════════════════════════════
+set -euo pipefail
+
+# ── Read settings ────────────────────────────────────────────────────────
+if [[ -f .env ]]; then
+    # shellcheck disable=SC1091
+    source .env
+fi
+
+HUB_NAME="${AZURE_IOT_HUB_NAME:-}"
+DEVICE_ID="${AZURE_DEVICE_ID:-}"
+
+if [[ -z "$HUB_NAME" || -z "$DEVICE_ID" ]]; then
+    echo "ERROR: Set AZURE_IOT_HUB_NAME and AZURE_DEVICE_ID in .env first."
+    exit 1
+fi
+
+CERTS_DIR="./certs"
+mkdir -p "$CERTS_DIR"
+
+echo ""
+echo "════════════════════════════════════════════════════════════════"
+echo " Generating certificates for:"
+echo "   Hub    : ${HUB_NAME}.azure-devices.net"
+echo "   Device : ${DEVICE_ID}"
+echo "════════════════════════════════════════════════════════════════"
+echo ""
+
+# ── 1. Root CA key + self-signed cert ────────────────────────────────────
+echo "[1/5] Generating Root CA key and certificate..."
+openssl genrsa -out "${CERTS_DIR}/root_ca.key" 4096
+
+openssl req -new -x509 \
+    -days 3650 \
+    -sha256 \
+    -key "${CERTS_DIR}/root_ca.key" \
+    -out "${CERTS_DIR}/root_ca.crt" \
+    -subj "/CN=OpcUa-Azure-RootCA/O=MyOrg/C=US"
+
+# ── 2. Device key + CSR ──────────────────────────────────────────────────
+echo "[2/5] Generating device key and CSR..."
+openssl genrsa -out "${CERTS_DIR}/device.key" 2048
+
+# CN must match the Device ID registered in IoT Hub
+openssl req -new \
+    -key "${CERTS_DIR}/device.key" \
+    -out "${CERTS_DIR}/device.csr" \
+    -subj "/CN=${DEVICE_ID}/O=MyOrg/C=US"
+
+# ── 3. Sign device cert with root CA ────────────────────────────────────
+echo "[3/5] Signing device certificate with Root CA..."
+openssl x509 -req \
+    -days 365 \
+    -sha256 \
+    -in  "${CERTS_DIR}/device.csr" \
+    -CA  "${CERTS_DIR}/root_ca.crt" \
+    -CAkey "${CERTS_DIR}/root_ca.key" \
+    -CAcreateserial \
+    -out "${CERTS_DIR}/device.crt"
+
+# ── 4. Download DigiCert Global Root G2 (Azure's server CA) ─────────────
+echo "[4/5] Downloading DigiCert Global Root G2 (Azure server trust anchor)..."
+DIGICERT_G2_URL="https://cacerts.digicert.com/DigiCertGlobalRootG2.crt.pem"
+
+if command -v curl &>/dev/null; then
+    curl -fsSL "$DIGICERT_G2_URL" -o "${CERTS_DIR}/azure_root_ca.pem"
+    echo "      Downloaded from $DIGICERT_G2_URL"
+else
+    echo ""
+    echo "  ⚠  curl not found. Manually download DigiCert Global Root G2:"
+    echo "     $DIGICERT_G2_URL"
+    echo "     and save as ${CERTS_DIR}/azure_root_ca.pem"
+    echo ""
+fi
+
+# ── 5. Verify generated files ────────────────────────────────────────────
+echo "[5/5] Verifying device certificate..."
+openssl verify -CAfile "${CERTS_DIR}/root_ca.crt" "${CERTS_DIR}/device.crt" \
+    && echo "      ✓ device.crt verifies against root_ca.crt"
+
+echo ""
+echo "════════════════════════════════════════════════════════════════"
+echo " Certificate files written to ${CERTS_DIR}/:"
+ls -1 "${CERTS_DIR}/"
+echo ""
+echo " Next steps:"
+echo ""
+echo "  A) Register your Root CA with Azure IoT Hub:"
+echo "     az iot hub certificate create \\"
+echo "       --hub-name ${HUB_NAME} \\"
+echo "       --name root-ca-cert \\"
+echo "       --path ${CERTS_DIR}/root_ca.crt"
+echo ""
+echo "  B) Verify ownership (proof-of-possession):"
+echo "     VERIFY_CODE=\$(az iot hub certificate generate-verification-code \\"
+echo "       --hub-name ${HUB_NAME} --name root-ca-cert --query etag -o tsv)"
+echo "     # Then create a verification cert with CN=\$VERIFY_CODE and sign with root CA"
+echo "     # Full guide: https://learn.microsoft.com/azure/iot-hub/tutorial-x509-scripts"
+echo ""
+echo "  C) Register device with X.509 CA auth:"
+echo "     az iot hub device-identity create \\"
+echo "       --hub-name ${HUB_NAME} \\"
+echo "       --device-id ${DEVICE_ID} \\"
+echo "       --auth-method x509_ca"
+echo ""
+echo "  D) Then run:  docker compose up --build"
+echo "════════════════════════════════════════════════════════════════"
