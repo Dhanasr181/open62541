@@ -1,0 +1,161 @@
+# OPC UA PubSub → Azure IoT Hub (X.509 / MQTT over TLS)
+
+Connects an open62541 OPC UA publisher **and** subscriber to Azure IoT Hub
+via MQTT over TLS (port 8883) using X.509 certificate authentication.
+
+```
+┌─────────────────────────────────────────────┐
+│  Docker host                                │
+│                                             │
+│  ┌──────────────────┐  ┌─────────────────┐  │
+│  │  publisher       │  │  subscriber     │  │
+│  │  (open62541      │  │  (open62541     │  │
+│  │   OPC UA server) │  │   OPC UA server)│  │
+│  └────────┬─────────┘  └────────┬────────┘  │
+│           │  MQTT/TLS 8883      │           │
+└───────────┼─────────────────────┼───────────┘
+            ▼                     ▼
+    ┌───────────────────────────────┐
+    │   Azure IoT Hub               │
+    │   <hub>.azure-devices.net     │
+    └───────────────────────────────┘
+```
+
+---
+
+## Project structure
+
+```
+opcua-azure/
+├── src/
+│   ├── azure_pubsub_mqtt_publish.c    ← publisher
+│   └── azure_pubsub_mqtt_subscribe.c  ← subscriber
+├── certs/                             ← gitignored; mount at runtime
+│   ├── device.crt
+│   ├── device.key
+│   └── azure_root_ca.pem
+├── scripts/
+│   └── generate_certs.sh              ← helper to generate & register certs
+├── CMakeLists.txt
+├── Dockerfile
+├── docker-compose.yml
+├── .env.example
+└── README.md
+```
+
+---
+
+## Quick start
+
+### 1 — Create your `.env`
+
+```bash
+cp .env.example .env
+# Edit .env:
+#   AZURE_IOT_HUB_NAME=myhub          ← without .azure-devices.net
+#   AZURE_DEVICE_ID=my-opc-device
+```
+
+### 2 — Generate certificates
+
+```bash
+chmod +x scripts/generate_certs.sh
+./scripts/generate_certs.sh
+```
+
+This creates `certs/device.crt`, `certs/device.key`, and downloads
+`certs/azure_root_ca.pem` (DigiCert Global Root G2).
+
+> **Important:** The script prints the `az` CLI commands needed to register
+> the Root CA and the device in IoT Hub. Run those before continuing.
+
+### 3 — Register the Root CA in Azure IoT Hub
+
+```bash
+# Upload CA certificate
+az iot hub certificate create \
+  --hub-name $AZURE_IOT_HUB_NAME \
+  --name root-ca-cert \
+  --path certs/root_ca.crt
+
+# Proof-of-possession (follow the prompts from generate_certs.sh output)
+# See: https://learn.microsoft.com/azure/iot-hub/tutorial-x509-scripts
+```
+
+### 4 — Register the device
+
+```bash
+az iot hub device-identity create \
+  --hub-name $AZURE_IOT_HUB_NAME \
+  --device-id $AZURE_DEVICE_ID \
+  --auth-method x509_ca
+```
+
+### 5 — Build and run
+
+```bash
+docker compose up --build
+```
+
+To run only the publisher or subscriber:
+
+```bash
+docker compose up --build publisher
+docker compose up subscriber
+```
+
+---
+
+## Environment variables
+
+| Variable | Required | Description |
+|---|---|---|
+| `AZURE_IOT_HUB_NAME` | ✅ | Hub name without `.azure-devices.net` |
+| `AZURE_DEVICE_ID` | ✅ | Device ID registered in IoT Hub |
+
+---
+
+## Certificate files expected at runtime
+
+| File | Description |
+|---|---|
+| `/certs/device.crt` | Device certificate (PEM) |
+| `/certs/device.key` | Device private key (PEM) |
+| `/certs/azure_root_ca.pem` | DigiCert Global Root G2 (Azure server CA) |
+
+These are bind-mounted read-only from `./certs/` on the host by `docker-compose.yml`.
+
+---
+
+## MQTT connection details (Azure IoT Hub)
+
+| Parameter | Value |
+|---|---|
+| Endpoint | `<hub>.azure-devices.net:8883` |
+| Protocol | MQTT 3.1.1 over TLS 1.2 |
+| Client ID | `<device-id>` |
+| Username | `<hub>.azure-devices.net/<device-id>/?api-version=2021-04-12` |
+| Password | *(empty — X.509 cert is the authenticator)* |
+| D2C topic | `devices/<device-id>/messages/events/` |
+| C2D topic | `devices/<device-id>/messages/devicebound/#` |
+
+---
+
+## Rebuilding open62541 version
+
+The Dockerfile clones open62541 `v1.4.6` by default. To change:
+
+```bash
+docker compose build --build-arg OPEN62541_VERSION=v1.4.7
+```
+
+---
+
+## Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| `The requested protocol is not supported` | Ensure `UA_ENABLE_MQTT=ON` during cmake build |
+| TLS handshake error | Verify `azure_root_ca.pem` is DigiCert G2 (not G1) |
+| `MQTT_CONNACK` 5 (not authorised) | Device CN in cert must exactly match `AZURE_DEVICE_ID` |
+| `mqttClientKeyPath` has no effect | Check your open62541 build; the key option may need to be enabled separately — see the comment in `azure_pubsub_mqtt_publish.c` |
